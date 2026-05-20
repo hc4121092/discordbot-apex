@@ -77,6 +77,7 @@ class ApexBot(commands.Bot):
             try:
                 if guild.me.display_name != new_nick:
                     await guild.me.edit(nick=new_nick)
+                    await send_debug(self, f"Nickname updated in {guild.name}: {new_nick}")
             except Exception as e:
                 # ニックネーム更新失敗もデバッグ送信
                 await send_debug(self, f"Nickname update failed in {guild.name}: {e}")
@@ -87,6 +88,7 @@ class ApexBot(commands.Bot):
     async def map_monitor(self):
         # 通知先が一つもなく、デバッグモードでもなければ何もしない
         if not self.config["br"] and not self.config["ranked"] and not DEBUG_MODE:
+            await send_debug(self, "Monitor loop skipped: No notification channels configured and DEBUG_MODE is off")
             return
 
         url = f"https://api.mozambiquehe.re/maprotation?version=2&auth={ALS_API_KEY}"
@@ -96,9 +98,7 @@ class ApexBot(commands.Bot):
             data = response.json()
 
             if DEBUG_MODE:
-                debug_json = json.dumps(data, indent=2, ensure_ascii=False)
-                # ログが多すぎる場合は生データのみ表示
-                print("API data fetched.") 
+                await send_debug(self, f"API response received. BR channels: {len(self.config['br'])}, Ranked channels: {len(self.config['ranked'])}")
 
             br_curr = data.get("battle_royale", {}).get("current", {}).get("map")
             rk_curr = data.get("ranked", {}).get("current", {}).get("map")
@@ -113,7 +113,7 @@ class ApexBot(commands.Bot):
                 self.last_br_map = br_curr
                 self.last_ranked_map = rk_curr
                 await self.update_nicknames(br_curr, rk_curr)
-                await send_debug(self, f"Bot started. Initial maps: BR={br_curr}, Rank={rk_curr}")
+                await send_debug(self, f"Bot started. Current maps: Casual={br_curr}, Ranked={rk_curr}")
                 return # 初回は「変更」ではないのでここで終了
 
             # 3. 変更検知ロジック
@@ -122,41 +122,56 @@ class ApexBot(commands.Bot):
             # カジュアルの変更チェック
             if br_curr != self.last_br_map:
                 await send_debug(self, f"BR Map Change: {self.last_br_map} -> {br_curr}")
-                await self.broadcast_map_update("br", f"**カジュアル** のマップが **{br_curr}** に変更されました。")
+                notification_sent = await self.broadcast_map_update("br", f"**カジュアル** のマップが **{br_curr}** に変更されました。")
+                await send_debug(self, f"BR notification sent to {notification_sent} channels")
                 self.last_br_map = br_curr # ここで値を更新
                 change_detected = True
 
             # ランクの変更チェック
             if rk_curr != self.last_ranked_map:
                 await send_debug(self, f"Rank Map Change: {self.last_ranked_map} -> {rk_curr}")
-                await self.broadcast_map_update("ranked", f"**ランク** のマップが **{rk_curr}** に変更されました。")
+                notification_sent = await self.broadcast_map_update("ranked", f"**ランク** のマップが **{rk_curr}** に変更されました。")
+                await send_debug(self, f"Rank notification sent to {notification_sent} channels")
                 self.last_ranked_map = rk_curr # ここで値を更新
                 change_detected = True
 
             # 変更があった場合のみニックネームを更新
             if change_detected:
                 await self.update_nicknames(br_curr, rk_curr)
+            else:
+                if DEBUG_MODE:
+                    await send_debug(self, f"No map changes detected. BR={br_curr}, Rank={rk_curr}")
 
         except Exception as e:
             await send_debug(self, f"Monitor Loop Error: {e}")
 
     # 通知の一斉送信
     async def broadcast_map_update(self, mode_key, message):
+        sent_count = 0
         for cid in self.config[mode_key][:]:
             channel = self.get_channel(cid)
             if channel:
                 try:
                     await channel.send(message, silent=True)
+                    sent_count += 1
+                    await send_debug(self, f"Message sent to channel {cid} ({channel.name})")
                 except discord.Forbidden:
                     await send_debug(self, f"Permission Denied: Cannot send message to channel {cid}")
+                except Exception as e:
+                    await send_debug(self, f"Failed to send to channel {cid}: {e}")
             else:
                 await send_debug(self, f"Removing invalid channel ID from config: {cid}")
                 self.config[mode_key].remove(cid)
                 self.save_channels()
+        return sent_count
 
     @map_monitor.before_loop
     async def before_monitor(self):
         await self.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await send_debug(self, f"Bot is ready! Logged in as {self.user}")
 
 bot = ApexBot()
 
